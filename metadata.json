@@ -1,0 +1,6 @@
+{
+  "name": "PulseX",
+  "description": "PulseX - Premium Dark-Mode Financial Intelligence & News App",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
