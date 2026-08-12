@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -26,10 +27,6 @@ object GeminiApiService {
         val buildConfigKey = try { BuildConfig.GEMINI_API_KEY } catch (e: Exception) { null }
         val altKey = System.getenv("API_KEY")
 
-        Log.d(TAG, "Environment variable name verified: $envKeyName")
-        Log.d(TAG, "System.getenv(\"$envKeyName\") detected: ${!envKeyValue.isNullOrBlank()}")
-        Log.d(TAG, "BuildConfig.GEMINI_API_KEY detected: ${!buildConfigKey.isNullOrBlank()}")
-
         val candidates = listOfNotNull(
             buildConfigKey,
             envKeyValue,
@@ -38,29 +35,26 @@ object GeminiApiService {
 
         for (key in candidates) {
             if (!key.isNullOrBlank() && key != "MY_GEMINI_API_KEY" && key != "GEMINI_API_KEY_PLACEHOLDER") {
-                val masked = if (key.length > 8) "${key.take(4)}...${key.takeLast(4)}" else "****"
-                Log.d(TAG, "API key successfully detected and loaded (masked: $masked). Length: ${key.length}")
                 return key
             }
         }
-        Log.e(TAG, "API key detection FAILED: No valid API key found.")
+        Log.e(TAG, "API key detection FAILED: No valid GEMINI_API_KEY found.")
         return ""
     }
 
     suspend fun generateArticleSummary(title: String, content: String): List<String>? = withContext(Dispatchers.IO) {
         val apiKey = getValidApiKey()
         if (apiKey.isBlank()) {
-            Log.e(TAG, "API Key is missing")
+            Log.e(TAG, "API Key is missing for article summary")
             return@withContext null
         }
 
-        val models = listOf("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest")
+        val models = listOf("gemini-2.5-flash", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.1-flash-lite-preview")
         for (model in models) {
             var connection: HttpURLConnection? = null
             try {
                 val urlString = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
                 val url = URL(urlString)
-                Log.d(TAG, "generateArticleSummary Request URL: $urlString, Model: $model")
 
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -72,15 +66,15 @@ object GeminiApiService {
 
                 val promptText = "Provide exactly 3 concise bullet points summarizing the key market insights of this article titled '$title':\n$content"
                 val requestBody = JSONObject().apply {
-                    put("contents", org.json.JSONArray().put(
-                        JSONObject().put("parts", org.json.JSONArray().put(
+                    put("contents", JSONArray().put(
+                        JSONObject().put("parts", JSONArray().put(
                             JSONObject().put("text", promptText)
                         ))
                     ))
                 }
 
                 connection.outputStream.use { os ->
-                    os.write(requestBody.toString().toByteArray())
+                    os.write(requestBody.toString().toByteArray(Charsets.UTF_8))
                 }
 
                 val responseCode = connection.responseCode
@@ -88,7 +82,6 @@ object GeminiApiService {
 
                 if (responseCode == 200) {
                     val responseString = connection.inputStream.bufferedReader().use { it.readText() }
-                    Log.d(TAG, "generateArticleSummary Response body: $responseString")
                     val json = JSONObject(responseString)
                     val text = json.optJSONArray("candidates")
                         ?.optJSONObject(0)
@@ -105,14 +98,17 @@ object GeminiApiService {
                     }
                 } else {
                     val errorBody = try {
-                        connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "No error body"
+                        connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "No error details available"
                     } catch (e: Exception) {
                         "Failed to read error body: ${e.message}"
                     }
                     Log.e(TAG, "generateArticleSummary model $model error: HTTP $responseCode - $errorBody")
+                    if (responseCode == 401 || responseCode == 403) {
+                        break
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "generateArticleSummary model $model exception stack trace:", e)
+                Log.e(TAG, "generateArticleSummary exception for model $model:", e)
             } finally {
                 connection?.disconnect()
             }
@@ -127,14 +123,14 @@ object GeminiApiService {
     ): Flow<String> = flow {
         val apiKey = getValidApiKey()
         if (apiKey.isBlank()) {
-            Log.e(TAG, "API Key is missing")
-            emit("Invalid API configuration. Please configure your GEMINI_API_KEY in the AI Studio Secrets panel.")
+            Log.e(TAG, "GEMINI_API_KEY is missing or invalid")
+            emit("API Configuration Error: GEMINI_API_KEY is missing. Please configure your API key in the AI Studio Secrets panel.")
             return@flow
         }
 
-        val models = listOf("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest")
+        val models = listOf("gemini-2.5-flash", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.1-flash-lite-preview")
         var success = false
-        var lastErrorMsg = "Unable to contact the AI service."
+        var lastErrorMsg = "Unable to connect to the Gemini AI service. Please check your network connection and try again."
 
         for (model in models) {
             if (success) break
@@ -142,7 +138,7 @@ object GeminiApiService {
             try {
                 val urlString = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?key=$apiKey&alt=sse"
                 val url = URL(urlString)
-                Log.d(TAG, "Attempting stream request with model: $model, Endpoint URL: $urlString")
+                Log.d(TAG, "Attempting stream request with model: $model")
 
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -153,20 +149,20 @@ object GeminiApiService {
                 }
 
                 val requestBody = JSONObject().apply {
-                    put("contents", org.json.JSONArray().put(
-                        JSONObject().put("parts", org.json.JSONArray().put(
+                    put("contents", JSONArray().put(
+                        JSONObject().put("parts", JSONArray().put(
                             JSONObject().put("text", prompt)
                         ))
                     ))
                     if (systemInstruction.isNotBlank()) {
-                        put("systemInstruction", JSONObject().put("parts", org.json.JSONArray().put(
+                        put("systemInstruction", JSONObject().put("parts", JSONArray().put(
                             JSONObject().put("text", systemInstruction)
                         )))
                     }
                 }
 
                 connection.outputStream.use { os ->
-                    os.write(requestBody.toString().toByteArray())
+                    os.write(requestBody.toString().toByteArray(Charsets.UTF_8))
                 }
 
                 val responseCode = connection.responseCode
@@ -174,7 +170,7 @@ object GeminiApiService {
 
                 if (responseCode == 200) {
                     success = true
-                    BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { reader ->
                         var line: String?
                         while (reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
@@ -216,44 +212,50 @@ object GeminiApiService {
                                         }
                                     }
                                 } catch (e: Exception) {
-                                    Log.e(TAG, "JSON parsing error in stream chunk: ${e.message}", e)
+                                    Log.e(TAG, "JSON parsing error in stream chunk: ${e.message}")
                                 }
                             }
                         }
                     }
                 } else {
                     val errorBody = try {
-                        connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "No error body"
+                        connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "No error details available"
                     } catch (e: Exception) {
-                        "Failed to read error body: ${e.message}"
+                        "Error reading response body: ${e.message}"
                     }
-                    Log.e(TAG, "Error for model $model: HTTP $responseCode - Error Body: $errorBody")
+                    Log.e(TAG, "HTTP $responseCode Error for model $model - Body: $errorBody")
 
                     lastErrorMsg = when (responseCode) {
-                        400 -> "Bad request (400) for model $model: $errorBody"
-                        401, 403 -> "Invalid API configuration or unauthorized API key (HTTP $responseCode). Please check your API key."
-                        404 -> "Model $model not found (404)."
-                        429 -> "Rate limit exceeded for model $model (429). Please try again later."
-                        500, 502, 503, 504 -> "AI server error ($responseCode): $errorBody"
-                        else -> "Server error ($responseCode): $errorBody"
+                        401 -> "Authentication failed (HTTP 401): Invalid GEMINI_API_KEY. Please verify your key configuration in Secrets."
+                        403 -> "Access denied (HTTP 403): Your GEMINI_API_KEY does not have permission to access the Gemini API service."
+                        429 -> "Rate limit exceeded (HTTP 429): Too many requests to Gemini API. Please wait a moment before trying again."
+                        500, 502, 503, 504 -> "Gemini server error (HTTP $responseCode): The AI service is temporarily unavailable. Please try again later."
+                        400 -> "Bad Request (HTTP 400): Request parameters or prompt formatting error."
+                        404 -> "Model $model not found (HTTP 404)."
+                        else -> "API Error (HTTP $responseCode): $errorBody"
+                    }
+
+                    if (responseCode == 401 || responseCode == 403) {
+                        break
                     }
                 }
             } catch (e: SocketTimeoutException) {
-                Log.e(TAG, "Timeout exception for model $model stack trace:", e)
-                lastErrorMsg = "Network timeout. The AI service took too long to respond."
+                Log.e(TAG, "Timeout connecting to model $model:", e)
+                lastErrorMsg = "Request timed out (SocketTimeoutException). The Gemini service took too long to respond. Please try again."
             } catch (e: UnknownHostException) {
-                Log.e(TAG, "DNS / UnknownHost exception for model $model stack trace:", e)
-                lastErrorMsg = "Network connection error: Unable to resolve host. Please check your internet connection."
+                Log.e(TAG, "DNS / Host resolution error for model $model:", e)
+                lastErrorMsg = "Network connection failed (UnknownHostException). Unable to resolve host. Please check your internet connection."
+                break
             } catch (e: SSLException) {
-                Log.e(TAG, "SSL exception for model $model stack trace:", e)
-                lastErrorMsg = "SSL security error connecting to AI service."
+                Log.e(TAG, "SSL Exception for model $model:", e)
+                lastErrorMsg = "SSL security error while establishing connection to Gemini service."
             } catch (e: Exception) {
-                Log.e(TAG, "Exception for model $model stack trace:", e)
-                val msg = e.message ?: "Unknown error"
+                Log.e(TAG, "Unexpected exception for model $model:", e)
+                val msg = e.localizedMessage ?: e.message ?: "Unknown error"
                 lastErrorMsg = when {
-                    msg.contains("timeout", ignoreCase = true) -> "Network timeout. Please check your connection."
-                    msg.contains("unable to resolve host", ignoreCase = true) -> "Network connection error. Please check your internet."
-                    else -> "Network error: $msg (${e.javaClass.simpleName})"
+                    msg.contains("timeout", ignoreCase = true) -> "Network timeout while communicating with Gemini API."
+                    msg.contains("unable to resolve host", ignoreCase = true) -> "Network connection error. Please verify your internet connection."
+                    else -> "Network error (${e.javaClass.simpleName}): $msg"
                 }
             } finally {
                 connection?.disconnect()
